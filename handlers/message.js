@@ -1,7 +1,8 @@
 import { handleAdminCommand } from 'lib/admin-commands';
 import { handleArchiveInput, looksLikeArchiveInput } from 'lib/archive-flow';
-import { isMessageBlocked } from 'lib/admin';
+import { claimFirstAdmin, hasAdmins, isMessageBlocked } from 'lib/admin';
 import { commandFromMessage, normaliseBvid } from 'lib/format';
+import { INITIAL_ADMIN_USER_ID } from 'lib/constants';
 import { pendingQueue } from 'lib/bili';
 import { reply, statusKeyboard } from 'lib/telegram';
 
@@ -62,6 +63,38 @@ async function showStatus(message, args) {
   });
 }
 
+async function handleStart(message) {
+  const senderId = message?.from?.id;
+
+  // First-admin claim path. Only fires when INITIAL_ADMIN_USER_ID is set in
+  // source, no admin exists yet, and the sender matches the configured ID.
+  // claimFirstAdmin is an atomic INSERT ... WHERE NOT EXISTS, so concurrent
+  // /start invocations cannot create two first admins.
+  if (Number.isSafeInteger(INITIAL_ADMIN_USER_ID) && INITIAL_ADMIN_USER_ID > 0) {
+    if (!(await hasAdmins())) {
+      if (senderId === INITIAL_ADMIN_USER_ID) {
+        if (await claimFirstAdmin(senderId)) {
+          await reply(
+            message,
+            'You are now the first administrator. Run /admin to see admin commands, then /setapi to configure the archive API.',
+          );
+          return;
+        }
+        // Race: another invocation claimed first admin between hasAdmins() and
+        // claimFirstAdmin(). Fall through to the normal help text.
+      } else {
+        await reply(
+          message,
+          'An initial administrator has not claimed this bot yet. Only the configured deployer can do so.',
+        );
+        return;
+      }
+    }
+  }
+
+  await reply(message, HELP, { parse_mode: 'HTML' });
+}
+
 export default async function handleMessage(message) {
   if (typeof message?.chat?.id !== 'number') return;
 
@@ -74,7 +107,12 @@ export default async function handleMessage(message) {
     const parsed = commandFromMessage(message);
     if (parsed && (await handleAdminCommand(message, parsed.command, parsed.args))) return;
 
-    if (parsed?.command === 'start' || parsed?.command === 'help') {
+    if (parsed?.command === 'start') {
+      await handleStart(message);
+      return;
+    }
+
+    if (parsed?.command === 'help') {
       await reply(message, HELP, { parse_mode: 'HTML' });
       return;
     }

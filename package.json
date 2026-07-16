@@ -12,9 +12,10 @@
     "diff": "tgcloud diff",
     "push": "tgcloud push",
     "migrate": "tgcloud migrate",
-    "deploy": "npm run check && tgcloud push && tgcloud migrate"
+    "webhook:sync": "tgcloud webhook sync",
+    "deploy": "npm run check && npm run push && npm run migrate"
   },
   "devDependencies": {
-    "@tgcloud/cli": "latest"
+    "@tgcloud/cli": "0.1.2"
   }
 }
