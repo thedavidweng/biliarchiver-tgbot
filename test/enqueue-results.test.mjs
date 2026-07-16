@@ -26,13 +26,13 @@ function classifyResult(payload, threwError) {
 }
 
 // Model of the caller's batch decision policy.
+// Production (lib/interactions.js, lib/archive-flow.js) rolls back ONLY on
+// network errors. An all-rejected batch (e.g. all duplicates already queued)
+// is a definitive API response and is confirmed/advanced — rolling it back
+// would create an infinite retry loop of already-queued items.
 function batchDecision(results) {
   const hasErrors = results.some((result) => result.error);
   if (hasErrors) return { action: 'rollback', reason: 'network_error' };
-
-  const anyAccepted = results.some((result) => result.accepted);
-  const allRejected = results.every((result) => result.rejected && !result.accepted);
-  if (allRejected) return { action: 'rollback', reason: 'all_rejected' };
 
   return { action: 'confirm' };
 }
@@ -86,13 +86,15 @@ test('batch with accepted + error -> rollback (NOT confirm)', () => {
   assert.equal(batchDecision(results).reason, 'network_error');
 });
 
-test('batch with all rejected -> rollback', () => {
+test('batch with all rejected -> confirm (definitive, no retry)', () => {
+  // All items rejected (e.g. already queued duplicates). This is a definitive
+  // API response, not a network error. Production confirms/advances — rolling
+  // back would re-send already-queued items forever.
   const results = [
     classifyResult({ success: false }, false),
     classifyResult({ success: false }, false),
   ];
-  assert.equal(batchDecision(results).action, 'rollback');
-  assert.equal(batchDecision(results).reason, 'all_rejected');
+  assert.equal(batchDecision(results).action, 'confirm');
 });
 
 test('batch with all errors -> rollback', () => {
