@@ -17,3 +17,4 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: node scripts/validate-project.mjs
+      - run: npm test

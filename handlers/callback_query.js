@@ -6,6 +6,7 @@ import {
   handleSourceCallback,
   handleStatusCallback,
 } from 'lib/interactions';
+import { isAnyBlacklisted } from 'lib/admin';
 import { answerCallback } from 'lib/telegram';
 
 export default async function handleCallbackQuery(callback) {
@@ -16,14 +17,28 @@ export default async function handleCallbackQuery(callback) {
   }
 
   try {
+    const callerId = callback?.from?.id;
+    const chatId = callback?.message?.chat?.id;
+    if (Number.isSafeInteger(callerId) && (await isAnyBlacklisted([callerId, chatId]))) {
+      await answerCallback(callback, 'You have been blocked from using this bot.', true);
+      return;
+    }
+
     if (data.startsWith(CALLBACK_STATUS_PREFIX)) {
       await handleStatusCallback(callback, data.slice(CALLBACK_STATUS_PREFIX.length));
       return;
     }
 
     if (data.startsWith(CALLBACK_SOURCE_PREFIX)) {
-      const id = Number(data.slice(CALLBACK_SOURCE_PREFIX.length));
-      await handleSourceCallback(callback, id);
+      const payload = data.slice(CALLBACK_SOURCE_PREFIX.length);
+      const [idStr, offsetStr] = payload.split(':');
+      const jobId = Number(idStr);
+      const expectedOffset = Number(offsetStr);
+      if (!Number.isSafeInteger(jobId) || !Number.isSafeInteger(expectedOffset) || expectedOffset < 0) {
+        await answerCallback(callback, 'Invalid source job.', true);
+        return;
+      }
+      await handleSourceCallback(callback, jobId, expectedOffset);
       return;
     }
 

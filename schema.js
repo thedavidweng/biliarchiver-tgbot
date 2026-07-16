@@ -41,9 +41,27 @@ export const sourceJobs = table(
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`(unixepoch())`),
+    lastActivityAt: integer('last_activity_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
   },
   (t) => ({
     ownerChatIdx: index('idx_source_jobs_owner_chat').on(t.ownerChatId),
     requesterIdx: index('idx_source_jobs_requester').on(t.requesterUserId),
   }),
+);
+
+// Per-user direct-archive request counter for rate limiting. Each row tracks
+// how many direct (non-source) archive requests a user has made within the
+// current window. The window start is stored as a unix timestamp; when the
+// window expires the counter resets.
+export const rateLimitCounters = table(
+  'rate_limit_counters',
+  {
+    userId: integer('user_id').primaryKey(),
+    count: integer('count').notNull().default(0),
+    windowStart: integer('window_start', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
 );
