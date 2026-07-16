@@ -64,6 +64,20 @@ The first administrator is claimed in-chat via `/start` (see [Deploy](#deploy)).
 
 ## Deploy
 
+### Quick checklist
+
+Only one variable in source needs to be set before the first deploy:
+
+1. **Set `INITIAL_ADMIN_USER_ID`** in `lib/constants.js` to your Telegram user ID.
+2. `npm install` → `npx @tgcloud/cli init` → `npx @tgcloud/cli login`
+3. `npm run deploy` (runs `check` + `push` + `migrate`) → `npm run webhook:sync`
+4. Send `/start` to the bot from your Telegram account to claim admin.
+5. Send `/setapi https://your-biliarchiver-api.example/` to point the bot at your API.
+
+The full step-by-step follows.
+
+### Step-by-step
+
 1. Install dependencies. This pulls the pinned `@tgcloud/cli` declared in `package.json` and writes `package-lock.json`:
 
    ```sh
@@ -79,22 +93,33 @@ The first administrator is claimed in-chat via `/start` (see [Deploy](#deploy)).
    npx @tgcloud/cli login
    ```
 
+   `init` creates a `.tgcloud/` directory (gitignored) that ties this local project to your bot. `login` authenticates you against the Telegram Serverless platform.
+
 3. Set your Telegram user ID as the one-time first-admin claimant in `lib/constants.js`:
 
    ```js
    export const INITIAL_ADMIN_USER_ID = 123456789;
    ```
 
-   This value is only consulted while no admin exists. Once you claim the role with `/start`, the value is ignored and can be removed in a later commit. Telegram authenticates the sender, so a public user ID in source is not a forgery risk.
+   This is the **only** variable you must edit in source. To find your user ID, send `/id` to any bot (e.g. [@userinfobot](https://t.me/userinfobot)) or to this bot after deploy. The value is only consulted while no admin exists. Once you claim the role with `/start`, it is ignored and can be removed in a later commit. Telegram authenticates the sender, so a public user ID in source is not a forgery risk.
 
-4. Validate, deploy modules, apply the reviewed schema, and synchronize the platform-managed webhook:
+4. Validate, deploy code, apply the schema, and synchronize the webhook:
 
    ```sh
-   npm run check
-   npm run push
-   npm run migrate
-   npm run webhook:sync
+   npm run deploy          # runs check + push + migrate
+   npm run webhook:sync    # register the platform webhook with Telegram
    ```
+
+   Or run each step individually:
+
+   ```sh
+   npm run check           # parse + lint all deployable modules
+   npm run push            # deploy code atomically
+   npm run migrate         # apply the SQLite schema
+   npm run webhook:sync    # synchronize the platform-managed webhook
+   ```
+
+   `npm run push` deploys code atomically. `npm run migrate` separately applies the SQLite schema; keep both commands in the release workflow. `webhook:sync` is needed once after the first deploy and again if you change the bot's webhook configuration.
 
 5. From the Telegram account whose ID you set in step 3, send `/start` to the bot. It will atomically claim the first admin role and reply with next steps.
 
@@ -104,11 +129,39 @@ The first administrator is claimed in-chat via `/start` (see [Deploy](#deploy)).
    /setapi https://your-biliarchiver-api.example/
    ```
 
-`npm run push` deploys code atomically. `npm run migrate` separately applies the SQLite schema; keep both commands in the release workflow.
+### Post-deploy configuration
+
+After the first deploy and admin claim, all ongoing configuration is done in-chat — no redeploy needed:
+
+| Setting | Command | Notes |
+| --- | --- | --- |
+| Archive API URL | `/setapi <url>` | Required. Public HTTPS, no embedded credentials. |
+| Request logging | `/setlog <chat_id> [thread_id]` | Optional. Sends a log message per archive request. |
+| Logging off | `/clearlog` | Disables request logging. |
+| Show config | `/config` | Prints the current API URL and log destination. |
+| Co-admins | `/addadmin <user_id>` | Grant admin to another user. |
+| Block abuse | `/blacklist <user_id>` | Block a user or chat from the bot. |
+
+### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `/start` did not claim admin | You sent it from the wrong account. `INITIAL_ADMIN_USER_ID` must match the Telegram user ID of the sender. Send `/id` to confirm your ID, fix `lib/constants.js`, redeploy, then `/start` again. |
+| Bot replies "archive API is not configured" | Run `/setapi <url>` as an admin. The API must be reachable over public HTTPS. |
+| `npm run push` fails with auth error | Run `npx @tgcloud/cli login` again. The session in `.tgcloud/` may have expired. |
+| Buttons do not respond | Run `npm run webhook:sync`. The webhook may not be registered with Telegram yet. |
+| Schema errors after schema changes | Run `npm run migrate` to apply the latest schema. |
+| `npx tgcloud` installs the wrong package | Use `npx @tgcloud/cli` (scoped) or `npm run <script>` instead. The unscoped `tgcloud` on npm is an unrelated project. |
 
 ## Local verification
 
 `npm run check` parses every deployable module and rejects runtime dependencies that Telegram Serverless cannot load.
+
+`npm test` runs the contract tests (no SDK or network required):
+
+```sh
+npm test
+```
 
 Use the platform runner for logic checks with the real SDK surface:
 
