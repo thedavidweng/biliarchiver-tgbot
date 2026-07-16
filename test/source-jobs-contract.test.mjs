@@ -10,9 +10,6 @@
 // - releaseSourceBatch rolls back to expectedOffset only if next_offset =
 //   expectedOffset + batch_size (this click's reserve is still the latest).
 // - confirmSourceBatch marks complete only when next_offset >= total_count.
-//
-// This test caught the original bug where the model clamped nextOffset and
-// the real code did not, causing releaseSourceBatch to fail on the last batch.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
