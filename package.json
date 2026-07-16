@@ -1,0 +1,20 @@
+{
+  "name": "biliarchiverbot-tgcloud",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node scripts/validate-project.mjs",
+    "status": "tgcloud status",
+    "diff": "tgcloud diff",
+    "push": "tgcloud push",
+    "migrate": "tgcloud migrate",
+    "deploy": "npm run check && tgcloud push && tgcloud migrate"
+  },
+  "devDependencies": {
+    "@tgcloud/cli": "latest"
+  }
+}
