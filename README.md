@@ -4,6 +4,8 @@ A Telegram-only front end for a BiliArchiver API, built for [Telegram Serverless
 
 The bot accepts Bilibili video links, BV and av IDs, short links, collections, favourites lists, series, and creator pages. It sends archive requests to a configured BiliArchiver API, keeps administration data in Telegram Serverless SQLite, and works without a VPS, webhook endpoint, Bot API token, or runtime npm packages.
 
+> **This repository does not include the BiliArchiver API itself.** You must run a compatible BiliArchiver API somewhere reachable over public HTTPS and point the bot at it with `/setapi` after deploy. The API must expose the endpoints described in [API contract](#api-contract) below.
+
 ## Runtime design
 
 | Concern | Implementation |
@@ -28,12 +30,13 @@ The deployed code consists only of `schema.js`, `handlers/`, and `lib/`. Every i
 | `/status BV…` | Show a status button for a known BVID |
 | `/help` | Show the in-chat guide |
 | `/id` | Show the sender's Telegram user ID |
+| `/start` | Show the help guide; claims first admin if configured (see below) |
 
 Source jobs retain the returned BVIDs in SQLite. Each click queues eight further requests, which keeps a Telegram Serverless invocation short and makes duplicate button presses safe. A source job stores at most 1,000 candidates.
 
 ## Administrator commands
 
-The deployer initializes the first administrator through the linked Telegram Serverless CLI. Chat users cannot bootstrap administrator access.
+The first administrator is claimed in-chat via `/start` (see [Deploy](#deploy)). Chat users cannot bootstrap administrator access any other way.
 
 | Command | Result |
 | --- | --- |
@@ -52,37 +55,56 @@ The deployer initializes the first administrator through the linked Telegram Ser
 
 `/setapi` accepts an HTTPS URL without embedded credentials. The Serverless runtime has no application-secret store in this project, so the API endpoint is intentionally a public, unauthenticated HTTPS endpoint. The Telegram Serverless CLI token remains local in `.tgcloud/` or in `TGCLOUD_TOKEN` for CI.
 
+## Prerequisites
+
+- Node.js 18 or newer.
+- A bot created with [@BotFather](https://t.me/BotFather) with **Serverless** enabled.
+- A running BiliArchiver API reachable over public HTTPS. This bot only talks to it; it does not host it.
+- Your own Telegram user ID, so you can claim the first admin role. Send `/id` to any bot (or to this one after deploy) to learn it.
+
 ## Deploy
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) and enable **Serverless** for it.
-2. Install the official CLI declared in `package.json`.
-3. Initialize the local Telegram Serverless project and link it to the bot:
+1. Install dependencies. This pulls the pinned `@tgcloud/cli` declared in `package.json` and writes `package-lock.json`:
 
    ```sh
-   npx tgcloud init
-   npx tgcloud login
+   npm install
    ```
+
+   Do not run `npx tgcloud` directly on a clean machine: the unscoped `tgcloud` package on npm is an unrelated project. Always use `npm run <script>` or `npx @tgcloud/cli` so the pinned CLI from `package-lock.json` is used.
+
+2. Initialize the local Telegram Serverless project and link it to the bot:
+
+   ```sh
+   npx @tgcloud/cli init
+   npx @tgcloud/cli login
+   ```
+
+3. Set your Telegram user ID as the one-time first-admin claimant in `lib/constants.js`:
+
+   ```js
+   export const INITIAL_ADMIN_USER_ID = 123456789;
+   ```
+
+   This value is only consulted while no admin exists. Once you claim the role with `/start`, the value is ignored and can be removed in a later commit. Telegram authenticates the sender, so a public user ID in source is not a forgery risk.
 
 4. Validate, deploy modules, apply the reviewed schema, and synchronize the platform-managed webhook:
 
    ```sh
    npm run check
-   npx tgcloud push
-   npx tgcloud migrate
-   npx tgcloud webhook sync
+   npm run push
+   npm run migrate
+   npm run webhook:sync
    ```
 
-5. Send `/id` to the deployed bot from the owner account, then initialize that ID locally and configure the endpoint in Telegram:
+5. From the Telegram account whose ID you set in step 3, send `/start` to the bot. It will atomically claim the first admin role and reply with next steps.
 
-   ```sh
-   npx tgcloud run lib/bootstrap-admin '123456789'
-   ```
+6. Still in Telegram, configure the archive API endpoint:
 
    ```text
-   /setapi https://archive-api.example/
+   /setapi https://your-biliarchiver-api.example/
    ```
 
-`npx tgcloud push` deploys code atomically. `npx tgcloud migrate` separately applies the SQLite schema; keep both commands in the release workflow.
+`npm run push` deploys code atomically. `npm run migrate` separately applies the SQLite schema; keep both commands in the release workflow.
 
 ## Local verification
 
@@ -91,8 +113,8 @@ The deployer initializes the first administrator through the linked Telegram Ser
 Use the platform runner for logic checks with the real SDK surface:
 
 ```sh
-npx tgcloud run handlers/message '{ chat: { id: 1 }, from: { id: 1 }, message_id: 1, text: "/help" }'
-npx tgcloud run handlers/message '{ chat: { id: 1 }, from: { id: 1 }, message_id: 2, text: "BV1xx411c7mD" }'
+npx @tgcloud/cli run handlers/message '{ chat: { id: 1 }, from: { id: 1 }, message_id: 1, text: "/help" }'
+npx @tgcloud/cli run handlers/message '{ chat: { id: 1 }, from: { id: 1 }, message_id: 2, text: "BV1xx411c7mD" }'
 ```
 
 ## Product boundaries
@@ -102,3 +124,17 @@ This repository serves Telegram conversations and callback buttons. A standalone
 Archive completion is checked on demand from the status button. Telegram Serverless invokes a handler for each update, so persisted callbacks provide a reliable completion path without process-lifetime polling or delayed timers.
 
 The platform's external `fetch` accepts textual responses up to 32 MB. The BiliArchiver API and Internet Archive metadata requests in this bot fit that contract.
+
+## API contract
+
+The bot talks to a BiliArchiver-compatible API over public HTTPS. The base URL is set with `/setapi`. All paths are relative to that base.
+
+| Method | Path | Purpose | Expected response |
+| --- | --- | --- | --- |
+| `POST` | `archive/<bvid>` | Enqueue a single video for archiving | `{ "success": true }` on accepted, `{ "success": false }` on duplicate or rejected |
+| `GET` | `archive` | List current archive items | `{ "items": [{ "bvid": "BV…", "status": "finished" \| "pending" \| … }] }` |
+| `POST` | `get_bvids_by/<type>/<id>` | Resolve a source to its BVID list | `{ "success": true, "bvids": ["BV…", …] }` |
+
+`<type>` is one of `season`, `favlist`, `series`, `up_videos`. `<id>` is the source identifier as parsed from the Bilibili URL.
+
+The API must not require authentication credentials embedded in the URL. The bot stores only the base origin in SQLite.
