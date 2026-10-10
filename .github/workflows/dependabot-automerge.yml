@@ -3,7 +3,8 @@ name: Dependabot auto-merge
 # Official pattern: pull_request_target so GITHUB_TOKEN has write access on
 # Dependabot PRs. Never checkout or execute PR code in this workflow.
 on:
-  pull_request_target:
+  # Metadata-only: same-repository Dependabot gate; no checkout or PR code.
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
 
 permissions: {}
 
@@ -25,7 +26,7 @@ jobs:
     steps:
       - name: Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -40,9 +41,10 @@ jobs:
         run: |
           set -euo pipefail
           # Release/review tooling stays manual.
-          deny='googleapis/release-please-action dependabot/fetch-metadata'
+          deny='googleapis/release-please-action dependabot/fetch-metadata jdx/jactionlint github/codeql-action zizmorcore/zizmor-action actions/dependency-review-action trufflesecurity/trufflehog sigstore/cosign-installer anchore/sbom-action'
+          dep_names="${DEP_NAMES// /}"
           for blocked in $deny; do
-            case ",${DEP_NAMES}," in
+            case ",${dep_names}," in
               *",${blocked},"*)
                 echo "skip auto-merge (denylist): $blocked"
                 exit 0
@@ -54,6 +56,11 @@ jobs:
           ut="${UPDATE_TYPE}"
           dt="${DEP_TYPE}"
 
+          if [ "$ut" = "version-update:semver-major" ]; then
+            echo "major updates require manual review"
+            exit 0
+          fi
+
           eligible=false
           # patch always (after denylist)
           if [ "$ut" = "version-update:semver-patch" ]; then
@@ -61,7 +68,7 @@ jobs:
           fi
           # github-actions non-major: auto (covers SHA pin bumps with empty update-type)
           if [ "$eco" = "github-actions" ] || [ "$eco" = "github_actions" ]; then
-            if [ "$ut" != "version-update:semver-major" ]; then
+            if [ "$ut" = "version-update:semver-patch" ] || [ "$ut" = "version-update:semver-minor" ]; then
               eligible=true
             fi
           fi
