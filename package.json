@@ -8,7 +8,7 @@
   },
   "scripts": {
     "check": "node scripts/validate-project.mjs",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --import ./test/support/register.mjs --test test/*.test.mjs",
     "status": "tgcloud status",
     "diff": "tgcloud diff",
     "push": "tgcloud push",
