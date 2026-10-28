@@ -57,7 +57,7 @@ The first administrator is claimed in-chat via `/start` (see [Deploy](#deploy)).
 
 ## Prerequisites
 
-- Node.js 18 or newer.
+- Node.js 24 or newer.
 - A bot created with [@BotFather](https://t.me/BotFather) with **Serverless** enabled.
 - A running BiliArchiver API reachable over public HTTPS. This bot only talks to it; it does not host it.
 - Your own Telegram user ID, so you can claim the first admin role. Send `/id` to any bot (or to this one after deploy) to learn it.
@@ -157,7 +157,7 @@ After the first deploy and admin claim, all ongoing configuration is done in-cha
 
 `npm run check` parses every deployable module and rejects runtime dependencies that Telegram Serverless cannot load.
 
-`npm test` runs the contract tests (no SDK or network required):
+`npm test` exercises the product modules with a local SDK adapter, controlled network responses, and in-memory SQLite (Node.js 24; no network required):
 
 ```sh
 npm test

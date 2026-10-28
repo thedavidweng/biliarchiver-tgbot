@@ -1,32 +1,8 @@
-// Contract test for looksLikeArchiveInput and the short-link patterns.
-// lib/archive-flow.js imports lib/bili.js which depends on `sdk`, so we
-// re-implement the pure regex here as a contract test.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-
-// Mirror of looksLikeArchiveInput from lib/archive-flow.js.
-function looksLikeArchiveInput(text) {
-  return /(?:\bBV[a-zA-Z0-9]{10}\b|\bav\d+\b|b23\.(?:tv|wtf)|bili2233\.cn|bilibili\.com)/i.test(
-    text ?? '',
-  );
-}
-
-// Mirror of resolveB23Links short-link pattern from lib/bili.js.
-function shortLinkPattern(text) {
-  return [
-    ...String(text).matchAll(
-      /(?:https?:\/\/)?(?:www\.)?b23\.(?:tv|wtf)\/[^\s<>'"`]+/gi,
-    ),
-  ];
-}
-
-function bili2233Pattern(text) {
-  return [
-    ...String(text).matchAll(
-      /(?:https?:\/\/)?(?:www\.)?bili2233\.cn\/[^\s<>'"`]+/gi,
-    ),
-  ];
-}
+import { looksLikeArchiveInput } from '../lib/archive-flow.js';
+import { resolveB23Links } from '../lib/bili.js';
+import { setFetch } from './support/sdk.mjs';
 
 test('looksLikeArchiveInput: BV ID', () => {
   assert.equal(looksLikeArchiveInput('BV1xx411c7mD'), true);
@@ -61,22 +37,14 @@ test('looksLikeArchiveInput: null/undefined is false', () => {
   assert.equal(looksLikeArchiveInput(undefined), false);
 });
 
-test('short link pattern matches b23.tv', () => {
-  const matches = shortLinkPattern('check https://b23.tv/abc123 out');
-  assert.equal(matches.length, 1);
-});
-
-test('short link pattern matches b23.wtf', () => {
-  const matches = shortLinkPattern('check https://b23.wtf/xyz out');
-  assert.equal(matches.length, 1);
-});
-
-test('bili2233.cn pattern matches', () => {
-  const matches = bili2233Pattern('check https://bili2233.cn/abc123 out');
-  assert.equal(matches.length, 1);
-});
-
-test('bili2233.cn pattern matches without scheme', () => {
-  const matches = bili2233Pattern('check bili2233.cn/abc123 out');
-  assert.equal(matches.length, 1);
-});
+for (const [name, link] of [
+  ['b23.tv', 'https://b23.tv/abc123'],
+  ['b23.wtf', 'https://b23.wtf/xyz'],
+  ['bili2233.cn', 'https://bili2233.cn/abc123'],
+  ['bili2233.cn without scheme', 'bili2233.cn/abc123'],
+]) {
+  test(`short link resolution matches ${name}`, async () => {
+    setFetch(async () => ({ ok: true, url: 'https://www.bilibili.com/video/BV1xx411c7mD' }));
+    assert.equal(await resolveB23Links(`check ${link} out`), 'check https://www.bilibili.com/video/BV1xx411c7mD out');
+  });
+}

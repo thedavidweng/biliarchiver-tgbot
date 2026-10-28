@@ -1,269 +1,63 @@
-// Contract test for the source-job offset lifecycle.
-//
-// The real lib/source-jobs.js depends on the Serverless `sdk` module which is
-// not available in CI. This test models the EXACT behavior of the real SQL:
-//
-// - reserveSourceBatch advances nextOffset by batchSize (NOT clamped to
-//   totalCount), so for the final partial batch nextOffset > totalCount.
-// - reserveSourceBatch uses WHERE next_offset = expectedOffset (optimistic
-//   lock from the callback data), so each button can only reserve once.
-// - releaseSourceBatch rolls back to expectedOffset only if next_offset =
-//   expectedOffset + batch_size (this click's reserve is still the latest).
-// - confirmSourceBatch marks complete only when next_offset >= total_count.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { reserveSourceBatch, releaseSourceBatch, confirmSourceBatch } from '../lib/source-jobs.js';
+import { sqlite } from './support/sdk.mjs';
 
-const BATCH_SIZE = 8;
-
-function makeJob(totalCount, bvids) {
-  return {
-    id: 1,
-    bvids,
-    totalCount,
-    nextOffset: 0,
-    batchSize: BATCH_SIZE,
-    status: 'active',
-    lastActivityAt: 1000,
-  };
+function makeJob(count) {
+  sqlite.exec('DELETE FROM source_jobs');
+  const bvids = Array.from({ length: count }, (_, i) => `BV${i}`);
+  sqlite.prepare('INSERT INTO source_jobs VALUES (1, 1, 1, ?, ?, ?, ?, ?, 0, 8, ?, 0)')
+    .run('series', '1', 'https://example.com', JSON.stringify(bvids), count, 'active');
 }
+function state() { return sqlite.prepare('SELECT * FROM source_jobs WHERE id = 1').get(); }
+const reserve = (offset) => reserveSourceBatch(1, offset);
+const release = (offset) => releaseSourceBatch(1, offset);
+const confirm = () => confirmSourceBatch(1);
 
-// Accurate model of reserveSourceBatch(id, expectedOffset).
-// Mirrors the real SQL: SET next_offset = next_offset + batch_size
-// WHERE id, status='active', next_offset = expectedOffset, next_offset < total_count.
-function reserve(job, expectedOffset) {
-  if (
-    job.status !== 'active' ||
-    job.nextOffset !== expectedOffset ||
-    job.nextOffset >= job.totalCount
-  ) {
-    return null;
-  }
-  // Real SQL: next_offset = next_offset + batch_size (NOT clamped)
-  job.nextOffset = job.nextOffset + job.batchSize;
-  job.lastActivityAt++;
-  const start = expectedOffset;
-  const end = Math.min(job.nextOffset, job.totalCount);
-  return {
-    ...job,
-    reservedStart: start,
-    reservedEnd: end,
-    bvids: job.bvids.slice(start, end),
-  };
-}
-
-// Accurate model of releaseSourceBatch(id, expectedOffset).
-// Mirrors the real SQL: SET next_offset = expectedOffset
-// WHERE next_offset = expectedOffset + batch_size.
-function release(job, expectedOffset) {
-  if (
-    job.status === 'active' &&
-    job.nextOffset === expectedOffset + job.batchSize
-  ) {
-    job.nextOffset = expectedOffset;
-    job.lastActivityAt++;
-  }
-}
-
-// Accurate model of confirmSourceBatch(id).
-// Mirrors the real SQL: SET status='complete'
-// WHERE status='active' AND next_offset >= total_count.
-function confirm(job) {
-  if (job.status === 'active' && job.nextOffset >= job.totalCount) {
-    job.status = 'complete';
-    job.lastActivityAt++;
-  }
-}
-
-// --- Basic reserve ---
-
-test('reserve advances offset by batchSize (not clamped)', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  const reserved = reserve(job, 0);
-  assert.equal(reserved.reservedStart, 0);
-  assert.equal(reserved.reservedEnd, 8);
-  assert.equal(reserved.bvids.length, 8);
-  assert.equal(job.nextOffset, 8); // 0 + 8
+test('reserve advances offset by batchSize and slices the batch', async () => {
+  makeJob(20); const job = await reserve(0);
+  assert.equal(job.reservedStart, 0); assert.equal(job.reservedEnd, 8);
+  assert.equal(job.bvids.length, 8); assert.equal(state().next_offset, 8);
 });
-
-test('reserve on final partial batch: nextOffset exceeds totalCount', () => {
-  const bvids = Array.from({ length: 10 }, (_, i) => `BV${i}`);
-  const job = makeJob(10, bvids);
-  reserve(job, 0); // first batch: 0 -> 8
-  const reserved = reserve(job, 8); // second batch: 8 -> 16
-  assert.equal(job.nextOffset, 16); // NOT clamped to 10
-  assert.equal(reserved.reservedStart, 8);
-  assert.equal(reserved.reservedEnd, 10); // clamped for slicing only
-  assert.equal(reserved.bvids.length, 2); // only 2 items in the last batch
-  assert.deepEqual(reserved.bvids, ['BV8', 'BV9']);
+test('reserve final partial batch exceeds totalCount', async () => {
+  makeJob(10); await reserve(0); const job = await reserve(8);
+  assert.equal(state().next_offset, 16); assert.equal(job.reservedStart, 8);
+  assert.equal(job.reservedEnd, 10); assert.deepEqual(job.bvids, ['BV8', 'BV9']);
 });
-
-// --- Double-click safety ---
-
-test('second click of same button fails (expectedOffset mismatch)', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  const r1 = reserve(job, 0);
-  assert.ok(r1);
-  const r2 = reserve(job, 0); // same expectedOffset
-  assert.equal(r2, null); // fails because nextOffset is now 8, not 0
+test('double click fails and next offset succeeds', async () => {
+  makeJob(20); assert.ok(await reserve(0)); assert.equal(await reserve(0), null);
+  const job = await reserve(8); assert.equal(job.reservedStart, 8); assert.equal(job.bvids[0], 'BV8');
 });
-
-test('next button has different expectedOffset and succeeds', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  const r1 = reserve(job, 0);
-  const r2 = reserve(job, 8); // new button encodes offset 8
-  assert.ok(r1);
-  assert.ok(r2);
-  assert.equal(r2.reservedStart, 8);
-  assert.equal(r2.bvids[0], 'BV8');
+test('release rolls back both full and partial batches', async () => {
+  makeJob(10); await reserve(0); await release(0); assert.equal(state().next_offset, 0);
+  await reserve(0); await reserve(8); await release(8); assert.equal(state().next_offset, 8);
 });
-
-// --- Release (rollback) ---
-
-test('release rolls back offset after failure', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  const reserved = reserve(job, 0);
-  assert.equal(job.nextOffset, 8);
-  release(job, 0);
-  assert.equal(job.nextOffset, 0);
+test('release does not overwrite a later reserve or a complete job', async () => {
+  makeJob(20); await reserve(0); await reserve(8); await release(0); assert.equal(state().next_offset, 16);
+  makeJob(8); await reserve(0); await confirm(); await release(0);
+  assert.equal(state().next_offset, 8); assert.equal(state().status, 'complete');
 });
-
-test('release on final partial batch: condition matches (nextOffset = expectedOffset + batchSize)', () => {
-  const bvids = Array.from({ length: 10 }, (_, i) => `BV${i}`);
-  const job = makeJob(10, bvids);
-  reserve(job, 0); // 0 -> 8
-  const reserved = reserve(job, 8); // 8 -> 16
-  assert.equal(job.nextOffset, 16);
-  // Release should work: 16 = 8 + 8 (expectedOffset + batchSize)
-  release(job, 8);
-  assert.equal(job.nextOffset, 8); // rolled back
+test('confirm waits for all items, including partial final batch', async () => {
+  makeJob(10); await reserve(0); await confirm(); assert.equal(state().status, 'active');
+  await reserve(8); await confirm(); assert.equal(state().status, 'complete');
+  makeJob(8); await reserve(0); await confirm(); assert.equal(state().status, 'complete');
 });
-
-test('release is no-op if a later click already advanced offset', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  const r1 = reserve(job, 0); // 0 -> 8
-  reserve(job, 8); // 8 -> 16
-  // Try to release r1's batch: 16 != 0 + 8 = 8, so no-op
-  release(job, 0);
-  assert.equal(job.nextOffset, 16); // unchanged
+test('failed batch can be retried with the same items', async () => {
+  makeJob(20); const first = await reserve(0); await release(0); const retry = await reserve(0);
+  assert.deepEqual(retry.bvids, first.bvids); assert.equal(retry.reservedStart, 0);
 });
-
-test('release on complete job is no-op', () => {
-  const bvids = Array.from({ length: 8 }, (_, i) => `BV${i}`);
-  const job = makeJob(8, bvids);
-  reserve(job, 0); // 0 -> 8
-  confirm(job); // complete
-  release(job, 0); // should be no-op (status != active)
-  assert.equal(job.nextOffset, 8);
-  assert.equal(job.status, 'complete');
+test('last batch can fail, roll back, retry and complete', async () => {
+  makeJob(10); await reserve(0); await confirm(); const last = await reserve(8);
+  await release(8); assert.equal(state().next_offset, 8); assert.equal(state().status, 'active');
+  const retry = await reserve(8); assert.deepEqual(retry.bvids, last.bvids); await confirm();
+  assert.equal(state().status, 'complete');
 });
-
-// --- Confirm ---
-
-test('confirm marks complete when nextOffset >= totalCount (full batch)', () => {
-  const bvids = Array.from({ length: 8 }, (_, i) => `BV${i}`);
-  const job = makeJob(8, bvids);
-  reserve(job, 0); // 0 -> 8
-  confirm(job);
-  assert.equal(job.status, 'complete');
+test('stale button fails after newer batch', async () => {
+  makeJob(20); await reserve(0); await confirm(); await reserve(8); await confirm();
+  assert.equal(state().status, 'active'); assert.equal(await reserve(0), null);
 });
-
-test('confirm marks complete when nextOffset > totalCount (partial last batch)', () => {
-  const bvids = Array.from({ length: 10 }, (_, i) => `BV${i}`);
-  const job = makeJob(10, bvids);
-  reserve(job, 0); // 0 -> 8
-  confirm(job); // 8 < 10, stays active
-  assert.equal(job.status, 'active');
-  reserve(job, 8); // 8 -> 16
-  confirm(job); // 16 >= 10, complete
-  assert.equal(job.status, 'complete');
-});
-
-test('confirm does not mark complete when items remain', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  reserve(job, 0); // 0 -> 8
-  confirm(job); // 8 < 20
-  assert.equal(job.status, 'active');
-});
-
-// --- Full lifecycle ---
-
-test('full lifecycle: reserve, fail, release, retry gets same batch', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  const r1 = reserve(job, 0);
-  release(job, 0); // rollback
-  const r2 = reserve(job, 0); // retry same button
-  assert.ok(r2);
-  assert.equal(r2.reservedStart, 0);
-  assert.deepEqual(r2.bvids, r1.bvids);
-});
-
-test('full lifecycle: all batches succeed, job completes', () => {
-  const bvids = Array.from({ length: 10 }, (_, i) => `BV${i}`);
-  const job = makeJob(10, bvids);
-  const r1 = reserve(job, 0);
-  confirm(job); // 8 < 10, active
-  assert.equal(job.status, 'active');
-  const r2 = reserve(job, 8);
-  confirm(job); // 16 >= 10, complete
-  assert.equal(job.status, 'complete');
-  assert.equal(r1.bvids.length, 8);
-  assert.equal(r2.bvids.length, 2);
-});
-
-test('full lifecycle: last batch fails, rollback, retry succeeds', () => {
-  const bvids = Array.from({ length: 10 }, (_, i) => `BV${i}`);
-  const job = makeJob(10, bvids);
-  reserve(job, 0); // 0 -> 8
-  confirm(job); // active
-  // Last batch (8 -> 16)
-  const r2 = reserve(job, 8);
-  assert.equal(r2.bvids.length, 2);
-  // Simulate enqueue failure
-  release(job, 8); // 16 -> 8
-  assert.equal(job.nextOffset, 8);
-  assert.equal(job.status, 'active');
-  // Retry
-  const r3 = reserve(job, 8);
-  assert.ok(r3);
-  assert.equal(r3.bvids.length, 2);
-  assert.deepEqual(r3.bvids, ['BV8', 'BV9']);
-  confirm(job);
-  assert.equal(job.status, 'complete');
-});
-
-// --- Stale button ---
-
-test('stale button (old expectedOffset) fails after newer button succeeded', () => {
-  const bvids = Array.from({ length: 20 }, (_, i) => `BV${i}`);
-  const job = makeJob(20, bvids);
-  reserve(job, 0); // 0 -> 8, success
-  confirm(job); // active
-  reserve(job, 8); // 8 -> 16, success
-  confirm(job); // complete (16 >= 20? no, 16 < 20, stays active)
-  assert.equal(job.status, 'active');
-  // User clicks old button (expectedOffset=0)
-  const stale = reserve(job, 0);
-  assert.equal(stale, null); // nextOffset is 16, not 0
-});
-
-// --- lastActivityAt ---
-
-test('lastActivityAt updates on reserve, release, and confirm', () => {
-  const bvids = Array.from({ length: 8 }, (_, i) => `BV${i}`);
-  const job = makeJob(8, bvids);
-  const initialActivity = job.lastActivityAt;
-  reserve(job, 0);
-  assert.equal(job.lastActivityAt, initialActivity + 1);
-  release(job, 0);
-  assert.equal(job.lastActivityAt, initialActivity + 2);
-  reserve(job, 0);
-  confirm(job);
-  assert.equal(job.lastActivityAt, initialActivity + 4);
+test('reserve, release and confirm update last activity', async () => {
+  makeJob(8); await reserve(0); assert.ok(state().last_activity_at > 0);
+  sqlite.exec('UPDATE source_jobs SET last_activity_at = 0'); await release(0); assert.ok(state().last_activity_at > 0);
+  await reserve(0); sqlite.exec('UPDATE source_jobs SET last_activity_at = 0'); await confirm(); assert.ok(state().last_activity_at > 0);
 });
